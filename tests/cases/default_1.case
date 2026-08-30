@@ -1,3 +1,5 @@
+# args: tests/test_input_1
+# exit: 0
 P8 324
 P4 366
 P6 454

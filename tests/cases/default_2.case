@@ -1,3 +1,5 @@
+# args: tests/test_input_2
+# exit: 0
 J5 296
 J7 362
 J2 432

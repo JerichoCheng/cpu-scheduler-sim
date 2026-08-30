@@ -1,0 +1,2 @@
+# args: --quantum 0 tests/test_input_1
+# exit: 1

@@ -1,0 +1,9 @@
+# args: --fault-penalty 0 tests/test_input_1
+P8 300
+P4 338
+P6 414
+P2 448
+P3 508
+P5 510
+P7 538
+P1 544
