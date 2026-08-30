@@ -1,0 +1,14 @@
+# Compiled binaries
+scheduler
+sim
+*.o
+*.out
+*.exe
+*.dSYM/
+
+# Test artefacts
+*.actual
+my_out*
+
+# macOS
+.DS_Store
