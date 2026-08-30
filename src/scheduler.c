@@ -11,6 +11,7 @@
 struct config {
     int quantum;
     int fault_penalty;
+    int show_stats;
 };
 
 struct process {
@@ -20,6 +21,8 @@ struct process {
     int nfaults;
     int faults[MAX_FAULTS];
     int cpuTime;
+    int completion_time;
+    int faults_triggered;
 };
 
 static int min_int(int a, int b) {
@@ -43,6 +46,7 @@ static int run_quantum(struct process *p, const struct config *cfg) {
     }
 
     p->cpuTime += advance;
+    p->faults_triggered += faults_in_window;
     return advance + (faults_in_window * cfg->fault_penalty);
 }
 
@@ -67,10 +71,58 @@ static int parse_int_arg(const char *str, int *out, int lower_bound) {
     return 1;
 }
 
+/*
+ * Prints simulation and performance statistics to stderr.
+ * 
+ * Metric definitions:
+ * - Turnaround Time: completion_time - arrival_time (all processes arrive at t=0).
+ * - Total Waiting Time: turnaround_time - total_time (includes both queued ready-state time and fault penalties).
+ * - Queued Waiting Time: total_waiting_time - fault_penalty_time (pure ready queue delay).
+ * - CPU Utilisation: (sum(total_time) / total_elapsed_time) * 100%.
+ */
+static void print_statistics(const struct process procs[], int nprocs, int total_time, int fault_penalty) {
+    if (nprocs == 0) {
+        return;
+    }
+
+    int total_cpu_time = 0;
+    int total_turnaround = 0;
+    int total_waiting = 0;
+    int total_faults_triggered = 0;
+
+    for (int i = 0; i < nprocs; i++) {
+        int turnaround = procs[i].completion_time;
+        int waiting = turnaround - procs[i].total_time;
+
+        total_cpu_time += procs[i].total_time;
+        total_turnaround += turnaround;
+        total_waiting += waiting;
+        total_faults_triggered += procs[i].faults_triggered;
+    }
+
+    int total_penalty_time = total_faults_triggered * fault_penalty;
+    int total_queued_time = total_waiting - total_penalty_time;
+
+    double avg_turnaround = (double)total_turnaround / nprocs;
+    double avg_waiting = (double)total_waiting / nprocs;
+    double avg_queued = (double)total_queued_time / nprocs;
+    double cpu_utilisation = (total_time > 0) ? ((double)total_cpu_time / total_time) * 100.0 : 0.0;
+
+    fprintf(stderr, "--- Statistics ---\n");
+    fprintf(stderr, "Total execution time: %d\n", total_time);
+    fprintf(stderr, "Average turnaround time: %.2f\n", avg_turnaround);
+    fprintf(stderr, "Average waiting time (total): %.2f\n", avg_waiting);
+    fprintf(stderr, "Average waiting time (queued only): %.2f\n", avg_queued);
+    fprintf(stderr, "CPU utilisation: %.2f%%\n", cpu_utilisation);
+    fprintf(stderr, "Total page faults triggered: %d\n", total_faults_triggered);
+    fprintf(stderr, "Total fault penalty: %d\n", total_penalty_time);
+}
+
 int main(int argc, char *argv[]) {
     struct config cfg = {
         .quantum = DEFAULT_QUANTUM,
-        .fault_penalty = DEFAULT_FAULT_PENALTY
+        .fault_penalty = DEFAULT_FAULT_PENALTY,
+        .show_stats = 0
     };
 
     const char *input_file = NULL;
@@ -89,6 +141,8 @@ int main(int argc, char *argv[]) {
                 return EXIT_FAILURE;
             }
             i++;
+        } else if (strcmp(argv[i], "--stats") == 0) {
+            cfg.show_stats = 1;
         } else if (strncmp(argv[i], "--", 2) == 0) {
             fprintf(stderr, "Error: Unknown option %s\n", argv[i]);
             return EXIT_FAILURE;
@@ -102,7 +156,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (input_file == NULL) {
-        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] <input-file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--stats] <input-file>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -122,6 +176,8 @@ int main(int argc, char *argv[]) {
         }
 
         procs[nprocs].cpuTime = 0;
+        procs[nprocs].completion_time = 0;
+        procs[nprocs].faults_triggered = 0;
         for (int i = 0; i < MAX_FAULTS; i++) {
             procs[nprocs].faults[i] = 0;
         }
@@ -177,11 +233,16 @@ int main(int argc, char *argv[]) {
             global_time += run_quantum(&procs[best], &cfg);
             ran[best] = 1;
 
-            // Process completed, output results
+            // Process completed, record completion time and output
             if (procs[best].cpuTime >= procs[best].total_time) {
+                procs[best].completion_time = global_time;
                 printf("%s %d\n", procs[best].name, global_time);
             }
         }
+    }
+
+    if (cfg.show_stats) {
+        print_statistics(procs, nprocs, global_time, cfg.fault_penalty);
     }
 
     return EXIT_SUCCESS;

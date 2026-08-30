@@ -1,9 +1,6 @@
 # Priority Round-Robin Scheduler with Page-Fault Penalties
 
 A discrete-event simulation of a priority-aware round-robin CPU scheduler in C11.
-Written for CITS2002 Systems Programming (UWA).
-
-> **Note:** this repository is private until course marks are released.
 
 ## Problem
 
@@ -134,6 +131,14 @@ required by the assignment. Parsing uses a single `sscanf` over twelve conversio
 specifiers; its return value is cross-checked against the declared fault count
 (`matched == 4 + nfaults`) so malformed and blank lines are rejected rather than
 silently producing a garbage process.
+
+**Statistics Output & Separation of Streams (`--stats`):**
+- **Stream Allocation:** Process completion sequences are written strictly to `stdout` to allow clean piping into downstream utilities. Performance metrics enabled by `--stats` and error diagnostics are routed to `stderr`.
+- **Turnaround Time:** `completion_time - arrival_time` (with all arrival times being 0).
+- **Waiting Time (Total):** Defined as `turnaround_time - total_time`. This represents the entire wall-clock duration a process spent not actively computing.
+- **Waiting Time (Queued Only):** `total_waiting_time - fault_penalty_time`, isolating pure CPU scheduling delays from I/O page fault blocks.
+- **CPU Utilisation:** `(sum(total_time) / total_elapsed_time) * 100.0%`.
+- **Fault Invariant:** Total fault penalties are computed from actual dynamically triggered faults, preserving the identity `total_elapsed_time == sum(total_time) + total_fault_penalty` across arbitrary inputs.
 
 ## Layout
 
