@@ -1,11 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
-#define MAX_LINE_LEN   256
-#define MAX_PROCS      8
-#define MAX_FAULTS     8
-#define FAULT_PENALTY  4
-#define QUANTUM        10
+#define MAX_LINE_LEN           256
+#define MAX_PROCS              8
+#define MAX_FAULTS             8
+#define DEFAULT_FAULT_PENALTY  4
+#define DEFAULT_QUANTUM        10
+
+struct config {
+    int quantum;
+    int fault_penalty;
+};
 
 struct process {
     char name[10];
@@ -21,9 +27,9 @@ static int min_int(int a, int b) {
 }
 
 // Advances process execution by one time quantum and calculates page fault penalties
-static int run_quantum(struct process *p, int quantum) {
+static int run_quantum(struct process *p, const struct config *cfg) {
     int start_time = p->cpuTime;
-    int advance = min_int(quantum, p->total_time - start_time);
+    int advance = min_int(cfg->quantum, p->total_time - start_time);
     int end_time = start_time + advance;
 
     // Strictly check the interval [start_time, end_time)
@@ -37,7 +43,7 @@ static int run_quantum(struct process *p, int quantum) {
     }
 
     p->cpuTime += advance;
-    return advance + (faults_in_window * FAULT_PENALTY);
+    return advance + (faults_in_window * cfg->fault_penalty);
 }
 
 // Check whether all processes have completed
@@ -50,13 +56,57 @@ static int has_unfinished_processes(const struct process procs[], int nprocs) {
     return 0;
 }
 
+// Safely parse an integer argument with a configurable lower bound
+static int parse_int_arg(const char *str, int *out, int lower_bound) {
+    char *end;
+    long val = strtol(str, &end, 10);
+    if (*end != '\0' || end == str || val < lower_bound) {
+        return 0;
+    }
+    *out = (int)val;
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
+    struct config cfg = {
+        .quantum = DEFAULT_QUANTUM,
+        .fault_penalty = DEFAULT_FAULT_PENALTY
+    };
+
+    const char *input_file = NULL;
+
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--quantum") == 0) {
+            if (i + 1 >= argc || !parse_int_arg(argv[i + 1], &cfg.quantum, 1)) {
+                fprintf(stderr, "Error: Invalid or missing argument for --quantum\n");
+                return EXIT_FAILURE;
+            }
+            i++;
+        } else if (strcmp(argv[i], "--fault-penalty") == 0) {
+            if (i + 1 >= argc || !parse_int_arg(argv[i + 1], &cfg.fault_penalty, 0)) {
+                fprintf(stderr, "Error: Invalid or missing argument for --fault-penalty\n");
+                return EXIT_FAILURE;
+            }
+            i++;
+        } else if (strncmp(argv[i], "--", 2) == 0) {
+            fprintf(stderr, "Error: Unknown option %s\n", argv[i]);
+            return EXIT_FAILURE;
+        } else {
+            if (input_file != NULL) {
+                fprintf(stderr, "Error: Multiple input files specified\n");
+                return EXIT_FAILURE;
+            }
+            input_file = argv[i];
+        }
+    }
+
+    if (input_file == NULL) {
+        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] <input-file>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    FILE *fp = fopen(argv[1], "r");
+    FILE *fp = fopen(input_file, "r");
     if (fp == NULL) {
         perror("Error opening file");
         return EXIT_FAILURE;
@@ -124,7 +174,7 @@ int main(int argc, char *argv[]) {
                 break;
             }
 
-            global_time += run_quantum(&procs[best], QUANTUM);
+            global_time += run_quantum(&procs[best], &cfg);
             ran[best] = 1;
 
             // Process completed, output results
