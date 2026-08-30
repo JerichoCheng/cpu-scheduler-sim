@@ -1,9 +1,6 @@
 # Priority Round-Robin Scheduler with Page-Fault Penalties
 
 A discrete-event simulation of a priority-aware round-robin CPU scheduler in C11.
-Written for CITS2002 Systems Programming (UWA).
-
-> **Note:** this repository is private until course marks are released.
 
 ## Problem
 
