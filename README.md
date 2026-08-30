@@ -1,6 +1,10 @@
 # Priority Round-Robin Scheduler with Page-Fault Penalties
 
 A discrete-event simulation of a priority-aware round-robin CPU scheduler in C11.
+<<<<<<< HEAD
+=======
+
+>>>>>>> 9e4d591 (Document the test harness and case format)
 
 ## Problem
 
@@ -30,7 +34,54 @@ Or run the full suite:
 
 ```
 make test
+
+## Tests
+
 ```
+gcc -Wall -Wextra src/scheduler.c -o scheduler
+bash run_tests.sh
+```
+
+The harness runs every case in `tests/cases/`, compares stdout against the
+expected output, and checks the exit status. It exits non-zero if any case
+fails, so it can be wired into CI unchanged.
+
+### Case format
+
+Each `.case` file is one self-contained test — no separate expected-output file
+to keep in sync:
+
+```
+# args: --fault-penalty 0 tests/test_input_1
+# exit: 0
+P8 300
+P4 338
+...
+```
+
+- `# args:` — arguments passed to the binary
+- `# exit:` — expected exit status, optional, defaults to `0`
+- everything else — expected stdout, verbatim
+
+Adding a test means adding a file; the harness needs no changes.
+
+### Current coverage
+
+| Case | What it pins down |
+|---|---|
+| `default_1`, `default_2` | the two reference inputs under default settings |
+| `quantum_20` | a longer quantum reorders completions but preserves the total |
+| `zero_penalty` | with penalties disabled the total collapses to `sum(total_time)` |
+| `reject_zero_quantum` | a zero quantum would never advance `cpuTime` — rejected rather than hanging |
+| `reject_bad_value` | non-numeric flag values |
+| `reject_missing_value` | a flag at the end of `argv` with nothing after it |
+| `reject_no_input` | no input file given |
+
+### Line endings
+
+The binary emits CRLF on Windows and LF elsewhere, so the harness diffs with
+`--strip-trailing-cr`. Case files are stored as LF; `.gitattributes` enforces
+this on checkout.
 
 ## Input format
 
@@ -87,6 +138,7 @@ silently producing a garbage process.
 ├── src/scheduler.c     # the simulation
 ├── tests/              # inputs and expected outputs
 ├── run_tests.sh        # diff-based test harness
+├── tests/cases/        # one file per test case
 └── Makefile
 ```
 
