@@ -1,4 +1,5 @@
 # args: --stats tests/test_input_1
+# stderr: 1
 P8 324
 P4 366
 P6 454
@@ -7,3 +8,11 @@ P3 556
 P5 558
 P7 590
 P1 596
+--- Statistics ---
+Total execution time: 596
+Average turnaround time: 492.00
+Average waiting time (total): 424.00
+Average waiting time (queued only): 417.50
+CPU utilisation: 91.28%
+Total page faults triggered: 13
+Total fault penalty: 52
