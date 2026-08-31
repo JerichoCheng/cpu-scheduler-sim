@@ -17,6 +17,7 @@ struct process {
     char name[10];
     int priority;
     int total_time;
+    int arrival_time;
     int nfaults;
     int faults[MAX_FAULTS];
     int cpuTime;
@@ -27,7 +28,7 @@ struct process {
 struct config;
 
 // Function pointer type for process selection and time-slice allocation
-typedef int (*policy_fn)(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice);
+typedef int (*policy_fn)(const struct process procs[], int nprocs, const int eligible[], const struct config *cfg, int *slice);
 
 struct config {
     int quantum;
@@ -36,6 +37,8 @@ struct config {
     enum output_format format;
     policy_fn pick;
     const char *policy_name;
+    int arrivals[MAX_PROCS];
+    int arrivals_count;
 };
 
 struct stats {
@@ -53,10 +56,10 @@ static int min_int(int a, int b) {
 }
 
 // Policy: Priority Round-Robin (lowest priority number first, ties broken by file order)
-static int policy_priority_rr(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice) {
+static int policy_priority_rr(const struct process procs[], int nprocs, const int eligible[], const struct config *cfg, int *slice) {
     int best = -1;
     for (int i = 0; i < nprocs; i++) {
-        if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
+        if (eligible[i]) {
             if (best == -1 || procs[i].priority < procs[best].priority) {
                 best = i;
             }
@@ -69,9 +72,10 @@ static int policy_priority_rr(const struct process procs[], int nprocs, const in
 }
 
 // Policy: Pure Round-Robin (ignores priority, picks the next eligible process in file order)
-static int policy_rr(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice) {
+static int policy_rr(const struct process procs[], int nprocs, const int eligible[], const struct config *cfg, int *slice) {
+    (void)procs;
     for (int i = 0; i < nprocs; i++) {
-        if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
+        if (eligible[i]) {
             *slice = cfg->quantum;
             return i;
         }
@@ -80,11 +84,11 @@ static int policy_rr(const struct process procs[], int nprocs, const int ran[], 
 }
 
 // Policy: Shortest Job First (non-preemptive: picks smallest total_time and runs to completion)
-static int policy_sjf(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice) {
+static int policy_sjf(const struct process procs[], int nprocs, const int eligible[], const struct config *cfg, int *slice) {
     (void)cfg;
     int best = -1;
     for (int i = 0; i < nprocs; i++) {
-        if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
+        if (eligible[i]) {
             if (best == -1 || procs[i].total_time < procs[best].total_time) {
                 best = i;
             }
@@ -138,6 +142,34 @@ static int parse_int_arg(const char *str, int *out, int lower_bound) {
     return 1;
 }
 
+// Parse comma-separated arrival times
+static int parse_arrivals(const char *str, int arrivals[], int *count) {
+    *count = 0;
+    const char *curr = str;
+    while (*curr != '\0') {
+        if (*count >= MAX_PROCS) {
+            return 0;
+        }
+        char *end;
+        long val = strtol(curr, &end, 10);
+        if (end == curr || val < 0) {
+            return 0;
+        }
+        arrivals[(*count)++] = (int)val;
+        if (*end == ',') {
+            curr = end + 1;
+            if (*curr == '\0') {
+                return 0;
+            }
+        } else if (*end == '\0') {
+            break;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 // Compute performance metrics from completed processes
 static struct stats compute_stats(const struct process procs[], int nprocs, int total_time, int fault_penalty) {
     struct stats s = {0};
@@ -151,7 +183,7 @@ static struct stats compute_stats(const struct process procs[], int nprocs, int 
     int total_faults = 0;
 
     for (int i = 0; i < nprocs; i++) {
-        int turnaround = procs[i].completion_time;
+        int turnaround = procs[i].completion_time - procs[i].arrival_time;
         int waiting = turnaround - procs[i].total_time;
 
         total_cpu_time += procs[i].total_time;
@@ -208,7 +240,9 @@ int main(int argc, char *argv[]) {
         .show_stats = 0,
         .format = FORMAT_HUMAN,
         .pick = policy_priority_rr,
-        .policy_name = "priority-rr"
+        .policy_name = "priority-rr",
+        .arrivals = {0},
+        .arrivals_count = 0
     };
 
     const char *input_file = NULL;
@@ -255,9 +289,15 @@ int main(int argc, char *argv[]) {
                 cfg.format = FORMAT_HUMAN;
             } else if (strcmp(argv[i + 1], "csv") == 0) {
                 cfg.format = FORMAT_CSV;
-                cfg.show_stats = 1; // Implicitly enable stats when CSV format is requested
+                cfg.show_stats = 1;
             } else {
                 fprintf(stderr, "Error: Unknown format %s\n", argv[i + 1]);
+                return EXIT_FAILURE;
+            }
+            i++;
+        } else if (strcmp(argv[i], "--arrivals") == 0) {
+            if (i + 1 >= argc || !parse_arrivals(argv[i + 1], cfg.arrivals, &cfg.arrivals_count)) {
+                fprintf(stderr, "Error: Invalid or missing argument for --arrivals\n");
                 return EXIT_FAILURE;
             }
             i++;
@@ -276,7 +316,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (input_file == NULL) {
-        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr|sjf>] [--format <human|csv>] [--stats] <input-file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr|sjf>] [--format <human|csv>] [--arrivals <csv>] [--stats] <input-file>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -298,6 +338,7 @@ int main(int argc, char *argv[]) {
         procs[nprocs].cpuTime = 0;
         procs[nprocs].completion_time = 0;
         procs[nprocs].faults_triggered = 0;
+        procs[nprocs].arrival_time = 0;
         for (int i = 0; i < MAX_FAULTS; i++) {
             procs[nprocs].faults[i] = 0;
         }
@@ -324,32 +365,67 @@ int main(int argc, char *argv[]) {
     }
     fclose(fp);
 
+    if (cfg.arrivals_count > 0) {
+        if (cfg.arrivals_count != nprocs) {
+            fprintf(stderr, "Error: Number of arrival times (%d) does not match process count (%d)\n", cfg.arrivals_count, nprocs);
+            return EXIT_FAILURE;
+        }
+        for (int i = 0; i < nprocs; i++) {
+            procs[i].arrival_time = cfg.arrivals[i];
+        }
+    }
+
     int global_time = 0;
-    int ran[MAX_PROCS];
+    int ran[MAX_PROCS] = {0};
 
     // Multi-round scheduling
     while (has_unfinished_processes(procs, nprocs)) {
+        int eligible[MAX_PROCS];
         for (int i = 0; i < nprocs; i++) {
-            ran[i] = 0;
+            eligible[i] = (!ran[i] && procs[i].cpuTime < procs[i].total_time && procs[i].arrival_time <= global_time);
         }
 
-        while (1) {
-            int slice = 0;
-            int best = cfg.pick(procs, nprocs, ran, &cfg, &slice);
-            if (best == -1) {
-                break;
-            }
+        int slice = 0;
+        int best = cfg.pick(procs, nprocs, eligible, &cfg, &slice);
 
+        if (best != -1) {
             global_time += run_quantum(&procs[best], slice, cfg.fault_penalty);
             ran[best] = 1;
 
-            // Record completion time (pure simulation state update)
             if (procs[best].cpuTime >= procs[best].total_time) {
                 procs[best].completion_time = global_time;
-
-                // Presentation layer: suppress completion events if CSV is active
                 if (cfg.format != FORMAT_CSV) {
                     printf("%s %d\n", procs[best].name, global_time);
+                }
+            }
+        } else {
+            int has_arrived_unfinished = 0;
+            int next_arrival = -1;
+
+            for (int i = 0; i < nprocs; i++) {
+                if (procs[i].cpuTime < procs[i].total_time) {
+                    if (procs[i].arrival_time <= global_time) {
+                        has_arrived_unfinished = 1;
+                    } else {
+                        if (next_arrival == -1 || procs[i].arrival_time < next_arrival) {
+                            next_arrival = procs[i].arrival_time;
+                        }
+                    }
+                }
+            }
+
+            if (has_arrived_unfinished) {
+                for (int i = 0; i < nprocs; i++) {
+                    ran[i] = 0;
+                }
+            } else {
+                if (next_arrival <= global_time) {
+                    fprintf(stderr, "Error: Scheduler internal logic error advancing idle time\n");
+                    return EXIT_FAILURE;
+                }
+                global_time = next_arrival;
+                for (int i = 0; i < nprocs; i++) {
+                    ran[i] = 0;
                 }
             }
         }

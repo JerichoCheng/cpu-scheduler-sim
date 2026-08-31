@@ -35,7 +35,7 @@ Full usage:
 
 ```
 ./scheduler [--quantum N] [--fault-penalty N] [--policy priority-rr|rr|sjf]
-            [--stats] [--format human|csv] <input-file>
+            [--arrivals T1,T2,...] [--stats] [--format human|csv] <input-file>
 ```
 
 `--quantum` must be at least 1: a quantum of zero would never advance `cpuTime`,
@@ -48,6 +48,17 @@ Completion events go to `stdout`, so they can be piped:
 ```
 ./scheduler tests/test_input_1 | sort -k2 -n
 ```
+
+`--arrivals` gives each process a release time, in input-file order:
+
+```
+./scheduler --arrivals 0,0,0,0,400,400,400,400 --stats tests/test_input_1
+```
+
+Without it every process is available from t = 0, which is what the reference inputs
+assume. The count must match the number of processes exactly — a short list is far
+more likely to be a typo than a request to default the rest to zero, so it is
+rejected rather than padded.
 
 `--stats` writes its summary to `stderr` instead, keeping `stdout` parseable.
 
@@ -139,11 +150,14 @@ Adding a test means adding a file; the harness needs no changes.
 | `policy_sjf` | a non-preemptive policy runs each process to completion in one slice |
 | `stats` | the three invariants: total 596, 13 faults triggered, 52 ms penalty |
 | `format_csv` | the CSV block, and that completion events are suppressed |
+| `arrivals_no_idle` | late arrivals that still leave the CPU continuously busy |
+| `arrivals_idle` | arrivals late enough to idle the CPU: total 684, utilisation 79.53% |
 | `reject_zero_quantum` | a zero quantum would never advance `cpuTime` — rejected rather than hanging |
 | `reject_bad_value` | non-numeric flag values |
 | `reject_missing_value` | a flag at the end of `argv` with nothing after it |
 | `reject_unknown_policy` | an unrecognised `--policy` name |
 | `reject_bad_format` | an unrecognised `--format` name |
+| `reject_arrivals_count_mismatch` | an `--arrivals` list whose length is not `nprocs` |
 | `reject_no_input` | no input file given |
 
 ### Line endings
@@ -172,6 +186,12 @@ no positions.
 
 ## Design notes
 
+**Turnaround is measured from arrival, not from zero.** With every process released
+at t = 0 the two are the same, so the distinction was invisible until release times
+existed. It stops being invisible immediately: under the idle example above the
+average turnaround drops from 492 to 245.50, not because scheduling improved but
+because the late processes simply existed for less time.
+
 **Three clocks, deliberately kept separate.** The single largest source of bugs here
 is conflating them:
 
@@ -188,15 +208,38 @@ boundaries. The closed-right alternative `(start, end]` fires every such fault o
 quantum early — the total stays correct, but intermediate completion times come out
 too high.
 
-**A useful invariant.** Because the CPU never idles, the final completion time must
-equal `sum(total_time) + penalty * faults_triggered`. For sample 1 under defaults
-that is `544 + 52 = 596`; with `--fault-penalty 0` it collapses to `544`. If the last
-line is right but earlier lines are wrong, the bug is in fault *timing*, not fault
-*counting* — which splits the search space in half before reading any code.
+**A useful invariant.** The final completion time must equal
+`sum(total_time) + penalty * faults_triggered + idle_time`. For sample 1 under
+defaults every process is available from the start, so the CPU never idles, the last
+term vanishes, and the total is `544 + 52 = 596`; with `--fault-penalty 0` it
+collapses further to `544`. Under
+`--arrivals 0,0,0,0,400,400,400,400` the first four finish at t = 312 and the rest do
+not arrive until t = 400, leaving 88 ms of idle time and a total of 684 — which is
+exactly `596 + 88`.
+
+This is the strongest debugging tool in the project. If the last line is right but
+earlier lines are wrong, the bug is in fault *timing*, not fault *counting*, which
+splits the search space in half before reading any code.
 
 Statistics count faults actually triggered during the simulation rather than the
 count declared in the input file. The two agree on this data, but only because every
 fault position happens to fall strictly below its process's total time.
+
+**An empty selection means two different things.** Once processes have release
+times, a policy returning -1 no longer just means "this pass is over". It can also
+mean nothing has arrived yet. The loop tells them apart by rescanning for a process
+that is unfinished *and* already released: if one exists it is merely blocked by
+`ran[]`, so the pass resets and the clock does not move. If none exists the CPU has
+nothing to run, and the clock jumps straight to the earliest pending arrival rather
+than ticking there one unit at a time — there is nothing to simulate in between. A
+guard rejects a computed arrival that is not strictly in the future, since that would
+leave the clock stationary and the outer loop spinning forever.
+
+**Policies never see the clock.** Eligibility — unfinished, arrived, not yet run this
+pass — is computed by the scheduling loop into an `eligible[]` mask, and the policy
+receives only that. Adding release times therefore changed no policy function at all.
+`policy_rr` no longer reads `procs` for anything, which is a good sign the mask is
+carrying the right amount of information.
 
 **Two output formats, because there are two consumers.** The human summary is
 prose-shaped: labelled lines, a percent sign, a header. Anything reading it

@@ -1,0 +1,2 @@
+# args: --arrivals 0,20 tests/test_input_1
+# exit: 1
