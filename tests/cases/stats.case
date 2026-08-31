@@ -9,6 +9,7 @@ P5 558
 P7 590
 P1 596
 --- Statistics ---
+Scheduling policy: priority-rr
 Total execution time: 596
 Average turnaround time: 492.00
 Average waiting time (total): 424.00

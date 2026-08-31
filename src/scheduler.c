@@ -8,12 +8,6 @@
 #define DEFAULT_FAULT_PENALTY  4
 #define DEFAULT_QUANTUM        10
 
-struct config {
-    int quantum;
-    int fault_penalty;
-    int show_stats;
-};
-
 struct process {
     char name[10];
     int priority;
@@ -25,8 +19,42 @@ struct process {
     int faults_triggered;
 };
 
+// Function pointer type for process selection strategies
+typedef int (*policy_fn)(const struct process procs[], int nprocs, const int ran[]);
+
+struct config {
+    int quantum;
+    int fault_penalty;
+    int show_stats;
+    policy_fn pick;
+    const char *policy_name;
+};
+
 static int min_int(int a, int b) {
     return (a < b) ? a : b;
+}
+
+// Policy: Priority Round-Robin (lowest priority number first, ties broken by file order)
+static int policy_priority_rr(const struct process procs[], int nprocs, const int ran[]) {
+    int best = -1;
+    for (int i = 0; i < nprocs; i++) {
+        if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
+            if (best == -1 || procs[i].priority < procs[best].priority) {
+                best = i;
+            }
+        }
+    }
+    return best;
+}
+
+// Policy: Pure Round-Robin (ignores priority, picks the next eligible process in file order)
+static int policy_rr(const struct process procs[], int nprocs, const int ran[]) {
+    for (int i = 0; i < nprocs; i++) {
+        if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 // Advances process execution by one time quantum and calculates page fault penalties
@@ -80,7 +108,7 @@ static int parse_int_arg(const char *str, int *out, int lower_bound) {
  * - Queued Waiting Time: total_waiting_time - fault_penalty_time (pure ready queue delay).
  * - CPU Utilisation: (sum(total_time) / total_elapsed_time) * 100%.
  */
-static void print_statistics(const struct process procs[], int nprocs, int total_time, int fault_penalty) {
+static void print_statistics(const struct process procs[], int nprocs, int total_time, const struct config *cfg) {
     if (nprocs == 0) {
         return;
     }
@@ -100,7 +128,7 @@ static void print_statistics(const struct process procs[], int nprocs, int total
         total_faults_triggered += procs[i].faults_triggered;
     }
 
-    int total_penalty_time = total_faults_triggered * fault_penalty;
+    int total_penalty_time = total_faults_triggered * cfg->fault_penalty;
     int total_queued_time = total_waiting - total_penalty_time;
 
     double avg_turnaround = (double)total_turnaround / nprocs;
@@ -109,6 +137,7 @@ static void print_statistics(const struct process procs[], int nprocs, int total
     double cpu_utilisation = (total_time > 0) ? ((double)total_cpu_time / total_time) * 100.0 : 0.0;
 
     fprintf(stderr, "--- Statistics ---\n");
+    fprintf(stderr, "Scheduling policy: %s\n", cfg->policy_name);
     fprintf(stderr, "Total execution time: %d\n", total_time);
     fprintf(stderr, "Average turnaround time: %.2f\n", avg_turnaround);
     fprintf(stderr, "Average waiting time (total): %.2f\n", avg_waiting);
@@ -122,7 +151,9 @@ int main(int argc, char *argv[]) {
     struct config cfg = {
         .quantum = DEFAULT_QUANTUM,
         .fault_penalty = DEFAULT_FAULT_PENALTY,
-        .show_stats = 0
+        .show_stats = 0,
+        .pick = policy_priority_rr,
+        .policy_name = "priority-rr"
     };
 
     const char *input_file = NULL;
@@ -141,6 +172,22 @@ int main(int argc, char *argv[]) {
                 return EXIT_FAILURE;
             }
             i++;
+        } else if (strcmp(argv[i], "--policy") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: Missing argument for --policy\n");
+                return EXIT_FAILURE;
+            }
+            if (strcmp(argv[i + 1], "priority-rr") == 0) {
+                cfg.pick = policy_priority_rr;
+                cfg.policy_name = "priority-rr";
+            } else if (strcmp(argv[i + 1], "rr") == 0) {
+                cfg.pick = policy_rr;
+                cfg.policy_name = "rr";
+            } else {
+                fprintf(stderr, "Error: Unknown policy %s\n", argv[i + 1]);
+                return EXIT_FAILURE;
+            }
+            i++;
         } else if (strcmp(argv[i], "--stats") == 0) {
             cfg.show_stats = 1;
         } else if (strncmp(argv[i], "--", 2) == 0) {
@@ -156,7 +203,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (input_file == NULL) {
-        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--stats] <input-file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr>] [--stats] <input-file>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -214,18 +261,7 @@ int main(int argc, char *argv[]) {
         }
 
         while (1) {
-            int best = -1;
-
-            // Break ties by original file order: scanning from index 0 with strict inequality ('<') 
-            // naturally preserves the process that appeared earlier in the input file
-            for (int i = 0; i < nprocs; i++) {
-                if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
-                    if (best == -1 || procs[i].priority < procs[best].priority) {
-                        best = i;
-                    }
-                }
-            }
-
+            int best = cfg.pick(procs, nprocs, ran);
             if (best == -1) {
                 break;
             }
@@ -242,7 +278,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (cfg.show_stats) {
-        print_statistics(procs, nprocs, global_time, cfg.fault_penalty);
+        print_statistics(procs, nprocs, global_time, &cfg);
     }
 
     return EXIT_SUCCESS;

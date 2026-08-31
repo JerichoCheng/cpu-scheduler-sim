@@ -1,0 +1,9 @@
+# args: --policy rr tests/test_input_1
+P8 348
+P4 390
+P6 474
+P2 502
+P3 556
+P5 558
+P7 590
+P1 596
