@@ -1,0 +1,3 @@
+# args: --policy sjf --format csv tests/test_input_1
+policy,total_time,avg_turnaround,avg_waiting_total,avg_waiting_queued,cpu_utilisation,faults_triggered,total_penalty
+sjf,596,283.00,215.00,208.50,91.28,13,52

@@ -8,6 +8,11 @@
 #define DEFAULT_FAULT_PENALTY  4
 #define DEFAULT_QUANTUM        10
 
+enum output_format {
+    FORMAT_HUMAN,
+    FORMAT_CSV
+};
+
 struct process {
     char name[10];
     int priority;
@@ -28,8 +33,19 @@ struct config {
     int quantum;
     int fault_penalty;
     int show_stats;
+    enum output_format format;
     policy_fn pick;
     const char *policy_name;
+};
+
+struct stats {
+    int total_time;
+    double avg_turnaround;
+    double avg_waiting_total;
+    double avg_waiting_queued;
+    double cpu_utilisation;
+    int faults_triggered;
+    int total_penalty;
 };
 
 static int min_int(int a, int b) {
@@ -122,24 +138,17 @@ static int parse_int_arg(const char *str, int *out, int lower_bound) {
     return 1;
 }
 
-/*
- * Prints simulation and performance statistics to stderr.
- * 
- * Metric definitions:
- * - Turnaround Time: completion_time - arrival_time (all processes arrive at t=0).
- * - Total Waiting Time: turnaround_time - total_time (includes both queued ready-state time and fault penalties).
- * - Queued Waiting Time: total_waiting_time - fault_penalty_time (pure ready queue delay).
- * - CPU Utilisation: (sum(total_time) / total_elapsed_time) * 100%.
- */
-static void print_statistics(const struct process procs[], int nprocs, int total_time, const struct config *cfg) {
+// Compute performance metrics from completed processes
+static struct stats compute_stats(const struct process procs[], int nprocs, int total_time, int fault_penalty) {
+    struct stats s = {0};
     if (nprocs == 0) {
-        return;
+        return s;
     }
 
     int total_cpu_time = 0;
     int total_turnaround = 0;
     int total_waiting = 0;
-    int total_faults_triggered = 0;
+    int total_faults = 0;
 
     for (int i = 0; i < nprocs; i++) {
         int turnaround = procs[i].completion_time;
@@ -148,26 +157,48 @@ static void print_statistics(const struct process procs[], int nprocs, int total
         total_cpu_time += procs[i].total_time;
         total_turnaround += turnaround;
         total_waiting += waiting;
-        total_faults_triggered += procs[i].faults_triggered;
+        total_faults += procs[i].faults_triggered;
     }
 
-    int total_penalty_time = total_faults_triggered * cfg->fault_penalty;
-    int total_queued_time = total_waiting - total_penalty_time;
+    int total_penalty = total_faults * fault_penalty;
+    int total_queued = total_waiting - total_penalty;
 
-    double avg_turnaround = (double)total_turnaround / nprocs;
-    double avg_waiting = (double)total_waiting / nprocs;
-    double avg_queued = (double)total_queued_time / nprocs;
-    double cpu_utilisation = (total_time > 0) ? ((double)total_cpu_time / total_time) * 100.0 : 0.0;
+    s.total_time = total_time;
+    s.avg_turnaround = (double)total_turnaround / nprocs;
+    s.avg_waiting_total = (double)total_waiting / nprocs;
+    s.avg_waiting_queued = (double)total_queued / nprocs;
+    s.cpu_utilisation = (total_time > 0) ? ((double)total_cpu_time / total_time) * 100.0 : 0.0;
+    s.faults_triggered = total_faults;
+    s.total_penalty = total_penalty;
 
+    return s;
+}
+
+// Print statistics in human-readable format to stderr
+static void print_stats_human(const struct stats *s, const char *policy_name) {
     fprintf(stderr, "--- Statistics ---\n");
-    fprintf(stderr, "Scheduling policy: %s\n", cfg->policy_name);
-    fprintf(stderr, "Total execution time: %d\n", total_time);
-    fprintf(stderr, "Average turnaround time: %.2f\n", avg_turnaround);
-    fprintf(stderr, "Average waiting time (total): %.2f\n", avg_waiting);
-    fprintf(stderr, "Average waiting time (queued only): %.2f\n", avg_queued);
-    fprintf(stderr, "CPU utilisation: %.2f%%\n", cpu_utilisation);
-    fprintf(stderr, "Total page faults triggered: %d\n", total_faults_triggered);
-    fprintf(stderr, "Total fault penalty: %d\n", total_penalty_time);
+    fprintf(stderr, "Scheduling policy: %s\n", policy_name);
+    fprintf(stderr, "Total execution time: %d\n", s->total_time);
+    fprintf(stderr, "Average turnaround time: %.2f\n", s->avg_turnaround);
+    fprintf(stderr, "Average waiting time (total): %.2f\n", s->avg_waiting_total);
+    fprintf(stderr, "Average waiting time (queued only): %.2f\n", s->avg_waiting_queued);
+    fprintf(stderr, "CPU utilisation: %.2f%%\n", s->cpu_utilisation);
+    fprintf(stderr, "Total page faults triggered: %d\n", s->faults_triggered);
+    fprintf(stderr, "Total fault penalty: %d\n", s->total_penalty);
+}
+
+// Print statistics in CSV format to stdout
+static void print_stats_csv(const struct stats *s, const char *policy_name) {
+    printf("policy,total_time,avg_turnaround,avg_waiting_total,avg_waiting_queued,cpu_utilisation,faults_triggered,total_penalty\n");
+    printf("%s,%d,%.2f,%.2f,%.2f,%.2f,%d,%d\n",
+           policy_name,
+           s->total_time,
+           s->avg_turnaround,
+           s->avg_waiting_total,
+           s->avg_waiting_queued,
+           s->cpu_utilisation,
+           s->faults_triggered,
+           s->total_penalty);
 }
 
 int main(int argc, char *argv[]) {
@@ -175,6 +206,7 @@ int main(int argc, char *argv[]) {
         .quantum = DEFAULT_QUANTUM,
         .fault_penalty = DEFAULT_FAULT_PENALTY,
         .show_stats = 0,
+        .format = FORMAT_HUMAN,
         .pick = policy_priority_rr,
         .policy_name = "priority-rr"
     };
@@ -214,6 +246,21 @@ int main(int argc, char *argv[]) {
                 return EXIT_FAILURE;
             }
             i++;
+        } else if (strcmp(argv[i], "--format") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: Missing argument for --format\n");
+                return EXIT_FAILURE;
+            }
+            if (strcmp(argv[i + 1], "human") == 0) {
+                cfg.format = FORMAT_HUMAN;
+            } else if (strcmp(argv[i + 1], "csv") == 0) {
+                cfg.format = FORMAT_CSV;
+                cfg.show_stats = 1; // Implicitly enable stats when CSV format is requested
+            } else {
+                fprintf(stderr, "Error: Unknown format %s\n", argv[i + 1]);
+                return EXIT_FAILURE;
+            }
+            i++;
         } else if (strcmp(argv[i], "--stats") == 0) {
             cfg.show_stats = 1;
         } else if (strncmp(argv[i], "--", 2) == 0) {
@@ -229,7 +276,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (input_file == NULL) {
-        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr|sjf>] [--stats] <input-file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr|sjf>] [--format <human|csv>] [--stats] <input-file>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -296,16 +343,25 @@ int main(int argc, char *argv[]) {
             global_time += run_quantum(&procs[best], slice, cfg.fault_penalty);
             ran[best] = 1;
 
-            // Process completed, record completion time and output
+            // Record completion time (pure simulation state update)
             if (procs[best].cpuTime >= procs[best].total_time) {
                 procs[best].completion_time = global_time;
-                printf("%s %d\n", procs[best].name, global_time);
+
+                // Presentation layer: suppress completion events if CSV is active
+                if (cfg.format != FORMAT_CSV) {
+                    printf("%s %d\n", procs[best].name, global_time);
+                }
             }
         }
     }
 
     if (cfg.show_stats) {
-        print_statistics(procs, nprocs, global_time, &cfg);
+        struct stats s = compute_stats(procs, nprocs, global_time, cfg.fault_penalty);
+        if (cfg.format == FORMAT_CSV) {
+            print_stats_csv(&s, cfg.policy_name);
+        } else {
+            print_stats_human(&s, cfg.policy_name);
+        }
     }
 
     return EXIT_SUCCESS;

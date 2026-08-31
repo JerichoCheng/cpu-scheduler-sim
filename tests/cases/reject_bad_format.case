@@ -1,0 +1,2 @@
+# args: --format xml tests/test_input_1
+# exit: 1
