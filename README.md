@@ -4,8 +4,6 @@ A discrete-event simulation of a round-robin CPU scheduler with configurable
 selection policies and page-fault penalties, in C11. Written for CITS2002 Systems
 Programming (UWA).
 
-> **Note:** this repository is private until course marks are released.
-
 ## Problem
 
 Eight processes compete for a single CPU. Each has a fixed priority (1 = highest,
