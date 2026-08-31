@@ -1,0 +1,19 @@
+# args: --arrivals 0,0,0,0,200,200,200,200 --stats tests/test_input_1
+# stderr: 1
+P4 190
+P2 340
+P3 438
+P8 448
+P1 522
+P6 528
+P5 574
+P7 596
+--- Statistics ---
+Scheduling policy: priority-rr
+Total execution time: 596
+Average turnaround time: 354.50
+Average waiting time (total): 286.50
+Average waiting time (queued only): 280.00
+CPU utilisation: 91.28%
+Total page faults triggered: 13
+Total fault penalty: 52
