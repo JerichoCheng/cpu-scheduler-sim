@@ -34,7 +34,7 @@ gcc -Wall -Wextra src/scheduler.c -o scheduler
 Full usage:
 
 ```
-./scheduler [--quantum N] [--fault-penalty N] [--policy priority-rr|rr] [--stats] <input-file>
+./scheduler [--quantum N] [--fault-penalty N] [--policy priority-rr|rr|sjf] [--stats] <input-file>
 ```
 
 `--quantum` must be at least 1: a quantum of zero would never advance `cpuTime`,
@@ -56,16 +56,34 @@ Completion events go to `stdout`, so they can be piped:
 |---|---|---|---|
 | `priority-rr` (default) | 492.00 | 417.50 | 596 |
 | `rr` | 501.75 | 427.25 | 596 |
+| `sjf` | **283.00** | **208.50** | 596 |
 
-The total is identical under both policies, because it is fixed by
-`sum(total_time) + penalty * faults_triggered`. Scheduling cannot change how much
-work there is — it only redistributes which processes wait longer. Priority
-scheduling buys about 10 ms of average turnaround here, entirely at the expense of
-the low-priority processes.
+The total is identical under all three policies, because it is fixed by
+`sum(total_time) + penalty * faults_triggered`. Scheduling does not create
+throughput — it only redistributes latency.
+
+**Why SJF wins on average turnaround.** With every process arriving at t = 0,
+non-preemptive shortest-job-first minimizes average turnaround, and the reason is
+easy to see by exchange: take any two adjacent jobs where the longer one runs first,
+and swap them. The shorter job now finishes earlier by the length of the longer one,
+the longer job finishes later by the length of the shorter one, and every job after
+the pair is unaffected. Since the shorter job's gain exceeds the longer job's loss,
+the sum of completion times strictly drops. Repeat until no such pair remains and you
+have sorted by length.
+
+**What it costs.** SJF cuts average turnaround by about 42% here compared to
+`priority-rr`, and it does so entirely at the expense of long jobs. `P1` has the
+second-highest priority in the input, but SJF never reads the priority field — it
+sees only that `P1` is the longest job, and puts it last, at t = 596. With a
+continuous stream of arrivals, short jobs would keep displacing long ones and the
+long ones would never run at all. Multi-level feedback queues exist to get most of
+SJF's average-case benefit without this failure mode.
 
 Selection is reached through a `policy_fn` function pointer, so the scheduling loop
-never knows which policy is active. Adding one means writing a function with that
-signature and registering a `--policy` name for it.
+never knows which policy is active. The pointer returns both the chosen process and
+the size of its time slice, which is what lets preemptive and non-preemptive policies
+share one loop. Adding a policy means writing a function with that signature and
+registering a `--policy` name for it.
 
 ## Tests
 
@@ -104,6 +122,7 @@ Adding a test means adding a file; the harness needs no changes.
 | `quantum_20` | a longer quantum reorders completions but preserves the total |
 | `zero_penalty` | with penalties disabled the total collapses to `sum(total_time)` |
 | `policy_rr` | ignoring priority changes the order and raises average turnaround |
+| `policy_sjf` | a non-preemptive policy runs each process to completion in one slice |
 | `stats` | the three invariants: total 596, 13 faults triggered, 52 ms penalty |
 | `reject_zero_quantum` | a zero quantum would never advance `cpuTime` — rejected rather than hanging |
 | `reject_bad_value` | non-numeric flag values |
@@ -168,6 +187,13 @@ output is `binary > got 2>&1`. It does not work: `stderr` is unbuffered while
 `stdout` becomes block-buffered once it is not a terminal, so the statistics land in
 the file before the completion lines that were printed first. The harness redirects
 the two streams to separate files and concatenates them in a fixed order.
+
+**Non-preemptive policies collapse the pass loop.** `sjf` gives its chosen process
+a slice equal to its remaining time, so the process runs to completion in a single
+step and the outer pass loop makes exactly one trip. `ran[]` still works, but its
+meaning shifts: under round-robin it records "has used this pass's turn", under a
+non-preemptive policy it records "has finished". The structure is redundant rather
+than wrong, and left in place because the round-robin policies still need it.
 
 **No dynamic allocation.** All storage is fixed-size arrays with stack duration, as
 required by the assignment. Parsing uses a single `sscanf` over twelve conversion

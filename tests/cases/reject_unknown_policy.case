@@ -1,2 +1,2 @@
-# args: --policy sjf tests/test_input_1
+# args: --policy nonexistent tests/test_input_1
 # exit: 1

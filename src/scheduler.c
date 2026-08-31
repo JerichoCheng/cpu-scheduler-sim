@@ -19,8 +19,10 @@ struct process {
     int faults_triggered;
 };
 
-// Function pointer type for process selection strategies
-typedef int (*policy_fn)(const struct process procs[], int nprocs, const int ran[]);
+struct config;
+
+// Function pointer type for process selection and time-slice allocation
+typedef int (*policy_fn)(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice);
 
 struct config {
     int quantum;
@@ -35,7 +37,7 @@ static int min_int(int a, int b) {
 }
 
 // Policy: Priority Round-Robin (lowest priority number first, ties broken by file order)
-static int policy_priority_rr(const struct process procs[], int nprocs, const int ran[]) {
+static int policy_priority_rr(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice) {
     int best = -1;
     for (int i = 0; i < nprocs; i++) {
         if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
@@ -44,23 +46,44 @@ static int policy_priority_rr(const struct process procs[], int nprocs, const in
             }
         }
     }
+    if (best != -1) {
+        *slice = cfg->quantum;
+    }
     return best;
 }
 
 // Policy: Pure Round-Robin (ignores priority, picks the next eligible process in file order)
-static int policy_rr(const struct process procs[], int nprocs, const int ran[]) {
+static int policy_rr(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice) {
     for (int i = 0; i < nprocs; i++) {
         if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
+            *slice = cfg->quantum;
             return i;
         }
     }
     return -1;
 }
 
-// Advances process execution by one time quantum and calculates page fault penalties
-static int run_quantum(struct process *p, const struct config *cfg) {
+// Policy: Shortest Job First (non-preemptive: picks smallest total_time and runs to completion)
+static int policy_sjf(const struct process procs[], int nprocs, const int ran[], const struct config *cfg, int *slice) {
+    (void)cfg;
+    int best = -1;
+    for (int i = 0; i < nprocs; i++) {
+        if (!ran[i] && procs[i].cpuTime < procs[i].total_time) {
+            if (best == -1 || procs[i].total_time < procs[best].total_time) {
+                best = i;
+            }
+        }
+    }
+    if (best != -1) {
+        *slice = procs[best].total_time - procs[best].cpuTime;
+    }
+    return best;
+}
+
+// Advances process execution by a given slice and calculates page fault penalties
+static int run_quantum(struct process *p, int slice, int fault_penalty) {
     int start_time = p->cpuTime;
-    int advance = min_int(cfg->quantum, p->total_time - start_time);
+    int advance = min_int(slice, p->total_time - start_time);
     int end_time = start_time + advance;
 
     // Strictly check the interval [start_time, end_time)
@@ -75,7 +98,7 @@ static int run_quantum(struct process *p, const struct config *cfg) {
 
     p->cpuTime += advance;
     p->faults_triggered += faults_in_window;
-    return advance + (faults_in_window * cfg->fault_penalty);
+    return advance + (faults_in_window * fault_penalty);
 }
 
 // Check whether all processes have completed
@@ -183,6 +206,9 @@ int main(int argc, char *argv[]) {
             } else if (strcmp(argv[i + 1], "rr") == 0) {
                 cfg.pick = policy_rr;
                 cfg.policy_name = "rr";
+            } else if (strcmp(argv[i + 1], "sjf") == 0) {
+                cfg.pick = policy_sjf;
+                cfg.policy_name = "sjf";
             } else {
                 fprintf(stderr, "Error: Unknown policy %s\n", argv[i + 1]);
                 return EXIT_FAILURE;
@@ -203,7 +229,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (input_file == NULL) {
-        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr>] [--stats] <input-file>\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr|sjf>] [--stats] <input-file>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -261,12 +287,13 @@ int main(int argc, char *argv[]) {
         }
 
         while (1) {
-            int best = cfg.pick(procs, nprocs, ran);
+            int slice = 0;
+            int best = cfg.pick(procs, nprocs, ran, &cfg, &slice);
             if (best == -1) {
                 break;
             }
 
-            global_time += run_quantum(&procs[best], &cfg);
+            global_time += run_quantum(&procs[best], slice, cfg.fault_penalty);
             ran[best] = 1;
 
             // Process completed, record completion time and output
