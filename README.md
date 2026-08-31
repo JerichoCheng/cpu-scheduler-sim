@@ -1,7 +1,7 @@
-# Priority Round-Robin Scheduler with Page-Fault Penalties
+# CPU Scheduler Simulator
 
-A discrete-event simulation of a round-robin CPU scheduler with configurable
-selection policies and page-fault penalties, in C11. Written for CITS2002 Systems
+A discrete-event simulation of CPU scheduling in C11: four selectable policies,
+configurable time quantum, page-fault penalties, and process arrival times. Written for CITS2002 Systems
 Programming (UWA).
 
 ## Problem
