@@ -30,13 +30,18 @@ struct config;
 // Function pointer type for process selection and time-slice allocation
 typedef int (*policy_fn)(const struct process procs[], int nprocs, const int eligible[], const struct config *cfg, int *slice);
 
+struct policy {
+    policy_fn pick;
+    const char *name;
+    int uses_pass; // 1 = constrained by ran[] within a pass, 0 = re-evaluates across all eligible processes each turn
+};
+
 struct config {
     int quantum;
     int fault_penalty;
     int show_stats;
     enum output_format format;
-    policy_fn pick;
-    const char *policy_name;
+    const struct policy *policy;
     int arrivals[MAX_PROCS];
     int arrivals_count;
 };
@@ -99,6 +104,38 @@ static int policy_sjf(const struct process procs[], int nprocs, const int eligib
     }
     return best;
 }
+
+// Policy: Shortest Remaining Time First (preemptive: picks smallest remaining CPU time, allocated by quantum)
+static int policy_srtf(const struct process procs[], int nprocs, const int eligible[], const struct config *cfg, int *slice) {
+    int best = -1;
+    for (int i = 0; i < nprocs; i++) {
+        if (eligible[i]) {
+            int rem_curr = procs[i].total_time - procs[i].cpuTime;
+            if (best == -1) {
+                best = i;
+            } else {
+                int rem_best = procs[best].total_time - procs[best].cpuTime;
+                if (rem_curr < rem_best) {
+                    best = i;
+                }
+            }
+        }
+    }
+    if (best != -1) {
+        *slice = cfg->quantum;
+    }
+    return best;
+}
+
+// Table of available scheduling policies
+static const struct policy POLICIES[] = {
+    { policy_priority_rr, "priority-rr", 1 },
+    { policy_rr,          "rr",          1 },
+    { policy_sjf,         "sjf",         1 },
+    { policy_srtf,        "srtf",        0 }
+};
+
+#define NUM_POLICIES (sizeof(POLICIES) / sizeof(POLICIES[0]))
 
 // Advances process execution by a given slice and calculates page fault penalties
 static int run_quantum(struct process *p, int slice, int fault_penalty) {
@@ -233,14 +270,22 @@ static void print_stats_csv(const struct stats *s, const char *policy_name) {
            s->total_penalty);
 }
 
+// Helper to format available policies into usage string
+static void print_usage(const char *prog_name) {
+    fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <", prog_name);
+    for (size_t i = 0; i < NUM_POLICIES; i++) {
+        fprintf(stderr, "%s%s", POLICIES[i].name, (i + 1 < NUM_POLICIES) ? "|" : "");
+    }
+    fprintf(stderr, ">] [--format <human|csv>] [--arrivals <csv>] [--stats] <input-file>\n");
+}
+
 int main(int argc, char *argv[]) {
     struct config cfg = {
         .quantum = DEFAULT_QUANTUM,
         .fault_penalty = DEFAULT_FAULT_PENALTY,
         .show_stats = 0,
         .format = FORMAT_HUMAN,
-        .pick = policy_priority_rr,
-        .policy_name = "priority-rr",
+        .policy = &POLICIES[0],
         .arrivals = {0},
         .arrivals_count = 0
     };
@@ -266,16 +311,15 @@ int main(int argc, char *argv[]) {
                 fprintf(stderr, "Error: Missing argument for --policy\n");
                 return EXIT_FAILURE;
             }
-            if (strcmp(argv[i + 1], "priority-rr") == 0) {
-                cfg.pick = policy_priority_rr;
-                cfg.policy_name = "priority-rr";
-            } else if (strcmp(argv[i + 1], "rr") == 0) {
-                cfg.pick = policy_rr;
-                cfg.policy_name = "rr";
-            } else if (strcmp(argv[i + 1], "sjf") == 0) {
-                cfg.pick = policy_sjf;
-                cfg.policy_name = "sjf";
-            } else {
+            int found = 0;
+            for (size_t j = 0; j < NUM_POLICIES; j++) {
+                if (strcmp(argv[i + 1], POLICIES[j].name) == 0) {
+                    cfg.policy = &POLICIES[j];
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
                 fprintf(stderr, "Error: Unknown policy %s\n", argv[i + 1]);
                 return EXIT_FAILURE;
             }
@@ -316,7 +360,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (input_file == NULL) {
-        fprintf(stderr, "Usage: %s [--quantum N] [--fault-penalty N] [--policy <priority-rr|rr|sjf>] [--format <human|csv>] [--arrivals <csv>] [--stats] <input-file>\n", argv[0]);
+        print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -378,15 +422,17 @@ int main(int argc, char *argv[]) {
     int global_time = 0;
     int ran[MAX_PROCS] = {0};
 
-    // Multi-round scheduling
+    // Main scheduling loop
     while (has_unfinished_processes(procs, nprocs)) {
         int eligible[MAX_PROCS];
         for (int i = 0; i < nprocs; i++) {
-            eligible[i] = (!ran[i] && procs[i].cpuTime < procs[i].total_time && procs[i].arrival_time <= global_time);
+            eligible[i] = (procs[i].cpuTime < procs[i].total_time &&
+                           procs[i].arrival_time <= global_time &&
+                           (!cfg.policy->uses_pass || !ran[i]));
         }
 
         int slice = 0;
-        int best = cfg.pick(procs, nprocs, eligible, &cfg, &slice);
+        int best = cfg.policy->pick(procs, nprocs, eligible, &cfg, &slice);
 
         if (best != -1) {
             global_time += run_quantum(&procs[best], slice, cfg.fault_penalty);
@@ -415,10 +461,12 @@ int main(int argc, char *argv[]) {
             }
 
             if (has_arrived_unfinished) {
+                // Pass completed: reset ran array for policies utilizing passes
                 for (int i = 0; i < nprocs; i++) {
                     ran[i] = 0;
                 }
             } else {
+                // CPU is idle: advance clock to next arrival
                 if (next_arrival <= global_time) {
                     fprintf(stderr, "Error: Scheduler internal logic error advancing idle time\n");
                     return EXIT_FAILURE;
@@ -434,9 +482,9 @@ int main(int argc, char *argv[]) {
     if (cfg.show_stats) {
         struct stats s = compute_stats(procs, nprocs, global_time, cfg.fault_penalty);
         if (cfg.format == FORMAT_CSV) {
-            print_stats_csv(&s, cfg.policy_name);
+            print_stats_csv(&s, cfg.policy->name);
         } else {
-            print_stats_human(&s, cfg.policy_name);
+            print_stats_human(&s, cfg.policy->name);
         }
     }
 

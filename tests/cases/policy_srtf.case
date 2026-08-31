@@ -1,0 +1,10 @@
+# args: --policy srtf tests/test_input_1
+# exit: 0
+P8 40
+P4 88
+P6 148
+P2 216
+P5 296
+P3 388
+P7 492
+P1 596
