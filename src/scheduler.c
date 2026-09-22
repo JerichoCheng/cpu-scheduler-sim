@@ -1,10 +1,12 @@
+// Needed so glibc exposes getline() under the strict -std=c11 the Makefile builds with.
+#define _POSIX_C_SOURCE 200809L
+
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_LINE_LEN           256
-#define MAX_PROCS              8
-#define MAX_FAULTS             8
+#define INITIAL_CAPACITY       4
 #define DEFAULT_FAULT_PENALTY  4
 #define DEFAULT_QUANTUM        10
 
@@ -14,12 +16,12 @@ enum output_format {
 };
 
 struct process {
-    char name[10];
+    char *name;          // dynamically allocated, exactly strlen(name) + 1 bytes
     int priority;
     int total_time;
     int arrival_time;
     int nfaults;
-    int faults[MAX_FAULTS];
+    int *faults;         // dynamically allocated, exactly nfaults entries (NULL if nfaults == 0)
     int cpuTime;
     int completion_time;
     int faults_triggered;
@@ -42,7 +44,7 @@ struct config {
     int show_stats;
     enum output_format format;
     const struct policy *policy;
-    int arrivals[MAX_PROCS];
+    int *arrivals;        // dynamically allocated, exactly arrivals_count entries
     int arrivals_count;
 };
 
@@ -168,6 +170,18 @@ static int has_unfinished_processes(const struct process procs[], int nprocs) {
     return 0;
 }
 
+// Release every process's dynamically-allocated name and fault list, then the table itself
+static void free_procs(struct process *procs, int nprocs) {
+    if (procs == NULL) {
+        return;
+    }
+    for (int i = 0; i < nprocs; i++) {
+        free(procs[i].name);
+        free(procs[i].faults);
+    }
+    free(procs);
+}
+
 // Safely parse an integer argument with a configurable lower bound
 static int parse_int_arg(const char *str, int *out, int lower_bound) {
     char *end;
@@ -179,31 +193,54 @@ static int parse_int_arg(const char *str, int *out, int lower_bound) {
     return 1;
 }
 
-// Parse comma-separated arrival times
-static int parse_arrivals(const char *str, int arrivals[], int *count) {
-    *count = 0;
+// Parse comma-separated arrival times into a freshly malloc'd array. On success, *out
+// receives the array (caller owns it and must free it) and *count its length. The
+// argument list is not bounded to a fixed process count: it grows the same way the
+// process table does, by doubling capacity as needed.
+static int parse_arrivals(const char *str, int **out, int *count) {
+    int capacity = INITIAL_CAPACITY;
+    int n = 0;
+    int *arrivals = malloc((size_t)capacity * sizeof(int));
+    if (arrivals == NULL) {
+        return 0;
+    }
+
     const char *curr = str;
     while (*curr != '\0') {
-        if (*count >= MAX_PROCS) {
-            return 0;
-        }
         char *end;
         long val = strtol(curr, &end, 10);
         if (end == curr || val < 0) {
+            free(arrivals);
             return 0;
         }
-        arrivals[(*count)++] = (int)val;
+
+        if (n == capacity) {
+            capacity *= 2;
+            int *grown = realloc(arrivals, (size_t)capacity * sizeof(int));
+            if (grown == NULL) {
+                free(arrivals);
+                return 0;
+            }
+            arrivals = grown;
+        }
+        arrivals[n++] = (int)val;
+
         if (*end == ',') {
             curr = end + 1;
             if (*curr == '\0') {
+                free(arrivals);
                 return 0;
             }
         } else if (*end == '\0') {
             break;
         } else {
+            free(arrivals);
             return 0;
         }
     }
+
+    *out = arrivals;
+    *count = n;
     return 1;
 }
 
@@ -286,7 +323,7 @@ int main(int argc, char *argv[]) {
         .show_stats = 0,
         .format = FORMAT_HUMAN,
         .policy = &POLICIES[0],
-        .arrivals = {0},
+        .arrivals = NULL,
         .arrivals_count = 0
     };
 
@@ -340,7 +377,7 @@ int main(int argc, char *argv[]) {
             }
             i++;
         } else if (strcmp(argv[i], "--arrivals") == 0) {
-            if (i + 1 >= argc || !parse_arrivals(argv[i + 1], cfg.arrivals, &cfg.arrivals_count)) {
+            if (i + 1 >= argc || !parse_arrivals(argv[i + 1], &cfg.arrivals, &cfg.arrivals_count)) {
                 fprintf(stderr, "Error: Invalid or missing argument for --arrivals\n");
                 return EXIT_FAILURE;
             }
@@ -370,48 +407,100 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    struct process procs[MAX_PROCS];
+    int capacity = INITIAL_CAPACITY;
     int nprocs = 0;
-    char line[MAX_LINE_LEN];
+    struct process *procs = malloc((size_t)capacity * sizeof(struct process));
+    if (procs == NULL) {
+        perror("malloc failed");
+        fclose(fp);
+        return EXIT_FAILURE;
+    }
 
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        if (nprocs >= MAX_PROCS) {
+    // Read one process record per line, growing both the process table and each
+    // process's own name/fault-list allocations to exactly what the line needs —
+    // nothing here assumes a maximum process count, name length, or fault count.
+    char *line = NULL;
+    size_t line_cap = 0;
+
+    while (getline(&line, &line_cap, fp) != -1) {
+        char *p = line;
+        while (*p != '\0' && isspace((unsigned char)*p)) {
+            p++;
+        }
+        if (*p == '\0') {
+            continue; // skip blank lines
+        }
+
+        // Process name runs up to the next whitespace character.
+        char *name_start = p;
+        while (*p != '\0' && !isspace((unsigned char)*p)) {
+            p++;
+        }
+        size_t name_len = (size_t)(p - name_start);
+
+        char *name = malloc(name_len + 1);
+        if (name == NULL) {
+            perror("malloc failed");
             break;
         }
+        memcpy(name, name_start, name_len);
+        name[name_len] = '\0';
 
+        // Chain strtol calls through the three fixed fields: priority, total_time, nfaults.
+        char *next = NULL;
+        long priority = strtol(p, &next, 10);
+        p = next;
+        long total_time = strtol(p, &next, 10);
+        p = next;
+        long nfaults = strtol(p, &next, 10);
+        p = next;
+
+        int *faults = NULL;
+        if (nfaults > 0) {
+            faults = malloc((size_t)nfaults * sizeof(int));
+            if (faults == NULL) {
+                perror("malloc failed");
+                free(name);
+                break;
+            }
+            for (long i = 0; i < nfaults; i++) {
+                faults[i] = (int)strtol(p, &next, 10);
+                p = next;
+            }
+        }
+
+        if (nprocs == capacity) {
+            capacity *= 2;
+            struct process *grown = realloc(procs, (size_t)capacity * sizeof(struct process));
+            if (grown == NULL) {
+                perror("realloc failed");
+                free(name);
+                free(faults);
+                break;
+            }
+            procs = grown;
+        }
+
+        procs[nprocs].name = name;
+        procs[nprocs].priority = (int)priority;
+        procs[nprocs].total_time = (int)total_time;
+        procs[nprocs].nfaults = (int)nfaults;
+        procs[nprocs].faults = faults;
         procs[nprocs].cpuTime = 0;
+        procs[nprocs].arrival_time = 0;
         procs[nprocs].completion_time = 0;
         procs[nprocs].faults_triggered = 0;
-        procs[nprocs].arrival_time = 0;
-        for (int i = 0; i < MAX_FAULTS; i++) {
-            procs[nprocs].faults[i] = 0;
-        }
-
-        int matched = sscanf(line,
-            "%9s %d %d %d %d %d %d %d %d %d %d %d",
-            procs[nprocs].name,
-            &procs[nprocs].priority,
-            &procs[nprocs].total_time,
-            &procs[nprocs].nfaults,
-            &procs[nprocs].faults[0],
-            &procs[nprocs].faults[1],
-            &procs[nprocs].faults[2],
-            &procs[nprocs].faults[3],
-            &procs[nprocs].faults[4],
-            &procs[nprocs].faults[5],
-            &procs[nprocs].faults[6],
-            &procs[nprocs].faults[7]
-        );
-
-        if (matched >= 4 && matched == 4 + procs[nprocs].nfaults) {
-            nprocs++;
-        }
+        nprocs++;
     }
+
+    free(line);
     fclose(fp);
 
     if (cfg.arrivals_count > 0) {
         if (cfg.arrivals_count != nprocs) {
             fprintf(stderr, "Error: Number of arrival times (%d) does not match process count (%d)\n", cfg.arrivals_count, nprocs);
+            free_procs(procs, nprocs);
+            free(cfg.arrivals);
             return EXIT_FAILURE;
         }
         for (int i = 0; i < nprocs; i++) {
@@ -420,11 +509,24 @@ int main(int argc, char *argv[]) {
     }
 
     int global_time = 0;
-    int ran[MAX_PROCS] = {0};
+    int *ran = calloc((size_t)nprocs, sizeof(int));
+    if (nprocs > 0 && ran == NULL) {
+        perror("calloc failed");
+        free_procs(procs, nprocs);
+        free(cfg.arrivals);
+        return EXIT_FAILURE;
+    }
+    int *eligible = malloc((size_t)nprocs * sizeof(int));
+    if (nprocs > 0 && eligible == NULL) {
+        perror("malloc failed");
+        free(ran);
+        free_procs(procs, nprocs);
+        free(cfg.arrivals);
+        return EXIT_FAILURE;
+    }
 
     // Main scheduling loop
     while (has_unfinished_processes(procs, nprocs)) {
-        int eligible[MAX_PROCS];
         for (int i = 0; i < nprocs; i++) {
             eligible[i] = (procs[i].cpuTime < procs[i].total_time &&
                            procs[i].arrival_time <= global_time &&
@@ -469,6 +571,10 @@ int main(int argc, char *argv[]) {
                 // CPU is idle: advance clock to next arrival
                 if (next_arrival <= global_time) {
                     fprintf(stderr, "Error: Scheduler internal logic error advancing idle time\n");
+                    free(eligible);
+                    free(ran);
+                    free_procs(procs, nprocs);
+                    free(cfg.arrivals);
                     return EXIT_FAILURE;
                 }
                 global_time = next_arrival;
@@ -487,6 +593,11 @@ int main(int argc, char *argv[]) {
             print_stats_human(&s, cfg.policy->name);
         }
     }
+
+    free(eligible);
+    free(ran);
+    free_procs(procs, nprocs);
+    free(cfg.arrivals);
 
     return EXIT_SUCCESS;
 }

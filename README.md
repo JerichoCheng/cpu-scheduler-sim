@@ -6,9 +6,12 @@ Programming (UWA).
 
 ## Problem
 
-Eight processes compete for a single CPU. Each has a fixed priority (1 = highest,
+Any number of processes compete for a single CPU. Each has a fixed priority (1 = highest,
 5 = lowest), a total execution time in milliseconds, and a list of positions in its
-own execution progress at which it triggers a page fault.
+own execution progress at which it triggers a page fault. Process names, and the
+number of faults per process, are unbounded too — the process table, each name, and
+each fault list are allocated dynamically from the input file, with no fixed cap
+anywhere.
 
 The scheduler runs in *passes*. On each scheduling decision it considers every
 process that is neither finished nor already run in the current pass, and hands the

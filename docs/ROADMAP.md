@@ -48,12 +48,15 @@ Then implement, selected by `--policy`:
 Comparing these on identical input is the payoff: it shows starvation under
 strict priority, convoy effects under FCFS, and why MLFQ exists.
 
-## Stage 4 — Arbitrary process counts
+## Stage 4 — Arbitrary process counts (done)
 
-Drop the fixed `MAX_PROCS 8`. Count the lines, then `malloc` the array; free it
-before exit. This is the natural place to practise the dynamic allocation the
-next lab requires. Run it under `valgrind` (or `leaks` on macOS) and keep the
-output clean.
+Dropped the fixed `MAX_PROCS 8` / `MAX_FAULTS 8` / `name[10]`. The process table
+now grows by doubling capacity as lines are read (`getline` + `realloc`), each
+process's name and fault list are allocated to their exact size, and everything
+is freed before exit. Verified clean under AddressSanitizer + UBSan (no local
+`valgrind`); regression case `beyond_old_limits` covers >8 processes, a name
+longer than the old 9-char cap, and a process with >8 faults — all three used to
+fail silently.
 
 ## Stage 5 — Arrival times
 
